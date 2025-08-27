@@ -24,6 +24,9 @@ import {
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const WS_URL = BACKEND_URL.replace('https://', 'wss://').replace('http://', 'ws://');
 
+console.log('Backend URL:', BACKEND_URL);
+console.log('WebSocket URL:', WS_URL);
+
 function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [stats, setStats] = useState({
