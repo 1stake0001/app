@@ -2,13 +2,12 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional, Dict, Set
 import json
 import asyncio
 import uuid
 from datetime import datetime, timezone
-import random
 import os
 import logging
 
@@ -16,26 +15,26 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # Create the main app
-app = FastAPI()
+app = FastAPI(title="Mobile Privacy Leakage Detector - Backend Bridge")
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-# In-memory storage for traffic data
+# In-memory storage for real-time data (last 1000 flows)
 traffic_flows: List[Dict] = []
-active_dashboard_connections: Set[WebSocket] = set()
+MAX_FLOWS = 1000
 
-# Data Models
+# Data Models for traffic flow
 class TrafficFlow(BaseModel):
     timestamp: str
-    flowId: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    flowId: str
     type: str  # "HTTP" or "HTTPS"
     method: str  # "GET", "POST", etc.
     host: str
     url: str
     status: str
-    leakType: Optional[str] = None  # "GPS_DATA", "DEVICE_INFO", "PERSONAL_DATA", etc.
-    leakDetail: Optional[str] = None
+    leakType: Optional[str] = None  # Set by mitmproxy script
+    leakDetail: Optional[str] = None  # Set by mitmproxy script
 
 class DashboardStats(BaseModel):
     totalFlows: int
@@ -43,40 +42,7 @@ class DashboardStats(BaseModel):
     recentFlows: List[TrafficFlow]
     privacyLeaks: List[TrafficFlow]
 
-# Mock Privacy Leak Detection Logic
-def detect_privacy_leak(flow_data: Dict) -> tuple[Optional[str], Optional[str]]:
-    """Mock privacy leak detection - returns (leak_type, leak_detail) or (None, None)"""
-    
-    # Mock detection patterns based on URL patterns and hosts
-    url = flow_data.get("url", "").lower()
-    host = flow_data.get("host", "").lower()
-    method = flow_data.get("method", "")
-    
-    # GPS/Location data patterns
-    if any(keyword in url for keyword in ["location", "gps", "coordinates", "latitude", "longitude", "geolocation"]):
-        return "GPS_DATA", f"Detected GPS/location data transmission to {host}"
-    
-    # Device information patterns
-    if any(keyword in url for keyword in ["device", "imei", "udid", "android_id", "ios_id", "device_info"]):
-        return "DEVICE_INFO", f"Device identifier transmitted to {host}"
-    
-    # Personal data patterns
-    if any(keyword in url for keyword in ["email", "phone", "contact", "profile", "personal"]):
-        return "PERSONAL_DATA", f"Personal information detected in request to {host}"
-    
-    # Social media tracking
-    if any(domain in host for domain in ["facebook", "google-analytics", "doubleclick", "adsystem"]):
-        return "TRACKING", f"Third-party tracking detected: {host}"
-    
-    # Random leak detection for demo (10% chance)
-    if random.random() < 0.1:
-        leak_types = ["GPS_DATA", "DEVICE_INFO", "PERSONAL_DATA", "TRACKING"]
-        leak_type = random.choice(leak_types)
-        return leak_type, f"Suspicious data pattern detected in {method} request to {host}"
-    
-    return None, None
-
-# WebSocket Connection Manager
+# WebSocket Connection Manager for Dashboard Clients
 class ConnectionManager:
     def __init__(self):
         self.dashboard_connections: Set[WebSocket] = set()
@@ -85,12 +51,27 @@ class ConnectionManager:
         await websocket.accept()
         self.dashboard_connections.add(websocket)
         logging.info(f"Dashboard client connected. Total connections: {len(self.dashboard_connections)}")
+        
+        # Send current stats to newly connected client
+        await self.send_current_stats(websocket)
     
     def disconnect_dashboard(self, websocket: WebSocket):
         self.dashboard_connections.discard(websocket)
         logging.info(f"Dashboard client disconnected. Total connections: {len(self.dashboard_connections)}")
     
+    async def send_current_stats(self, websocket: WebSocket):
+        """Send current statistics to a specific WebSocket"""
+        try:
+            stats = self._generate_current_stats()
+            await websocket.send_text(json.dumps({
+                "type": "stats_update",
+                "data": stats.dict()
+            }))
+        except Exception as e:
+            logging.error(f"Error sending current stats: {e}")
+    
     async def broadcast_to_dashboards(self, data: dict):
+        """Broadcast data to all connected dashboard clients"""
         if self.dashboard_connections:
             message = json.dumps(data)
             disconnected = []
@@ -103,138 +84,135 @@ class ConnectionManager:
             # Remove disconnected clients
             for conn in disconnected:
                 self.dashboard_connections.discard(conn)
+    
+    async def broadcast_new_traffic(self, flow_data: dict):
+        """Broadcast new traffic flow to all dashboard clients"""
+        await self.broadcast_to_dashboards({
+            "type": "new_traffic", 
+            "data": flow_data
+        })
+    
+    async def broadcast_stats_update(self):
+        """Broadcast updated statistics to all dashboard clients"""
+        stats = self._generate_current_stats()
+        await self.broadcast_to_dashboards({
+            "type": "stats_update",
+            "data": stats.dict()
+        })
+    
+    def _generate_current_stats(self) -> DashboardStats:
+        """Generate current dashboard statistics"""
+        total_flows = len(traffic_flows)
+        privacy_leaks = [f for f in traffic_flows if f.get("leakType")]
+        total_leaks = len(privacy_leaks)
+        
+        return DashboardStats(
+            totalFlows=total_flows,
+            totalLeaks=total_leaks,
+            recentFlows=[TrafficFlow(**f) for f in traffic_flows[-10:]][::-1],  # Last 10, most recent first
+            privacyLeaks=[TrafficFlow(**f) for f in privacy_leaks[-50:]][::-1]  # Last 50 leaks, most recent first
+        )
 
 manager = ConnectionManager()
 
 # WebSocket Endpoints
+
 @app.websocket("/ws/dashboard")
 async def websocket_dashboard_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for dashboard clients to receive real-time updates"""
     await manager.connect_dashboard(websocket)
     try:
+        # Keep connection alive and handle any messages from dashboard
         while True:
-            # Send current stats periodically
-            stats = DashboardStats(
-                totalFlows=len(traffic_flows),
-                totalLeaks=len([f for f in traffic_flows if f.get("leakType")]),
-                recentFlows=[TrafficFlow(**f) for f in traffic_flows[-10:]],
-                privacyLeaks=[TrafficFlow(**f) for f in traffic_flows if f.get("leakType")]
-            )
-            await websocket.send_text(json.dumps({
-                "type": "stats_update",
-                "data": stats.dict()
-            }))
-            await asyncio.sleep(5)  # Send updates every 5 seconds
+            # Dashboard doesn't need to send data, just receive
+            # But we need to keep the connection alive
+            await asyncio.sleep(1)
     except WebSocketDisconnect:
         manager.disconnect_dashboard(websocket)
 
 @app.websocket("/ws/traffic")
 async def websocket_traffic_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for mitmproxy script to send traffic data"""
     await websocket.accept()
-    logging.info("Traffic source connected")
+    logging.info("mitmproxy script connected to traffic endpoint")
     
     try:
         while True:
+            # Receive traffic data from mitmproxy script
             data = await websocket.receive_text()
             try:
                 flow_data = json.loads(data)
+                logging.info(f"Received traffic data from mitmproxy: {flow_data.get('method')} {flow_data.get('host')}{flow_data.get('url')}")
                 
-                # Apply privacy leak detection
-                leak_type, leak_detail = detect_privacy_leak(flow_data)
-                if leak_type:
-                    flow_data["leakType"] = leak_type
-                    flow_data["leakDetail"] = leak_detail
+                # Validate required fields
+                required_fields = ['timestamp', 'type', 'method', 'host', 'url', 'status']
+                if not all(field in flow_data for field in required_fields):
+                    logging.error(f"Missing required fields in traffic data: {flow_data}")
+                    continue
                 
                 # Ensure flowId exists
                 if "flowId" not in flow_data:
                     flow_data["flowId"] = str(uuid.uuid4())
                 
-                # Store in memory (keep last 1000 flows)
+                # Store traffic flow (maintain max size)
                 traffic_flows.append(flow_data)
-                if len(traffic_flows) > 1000:
+                if len(traffic_flows) > MAX_FLOWS:
                     traffic_flows.pop(0)
                 
-                # Broadcast to all dashboard clients
-                await manager.broadcast_to_dashboards({
-                    "type": "new_traffic",
-                    "data": flow_data
-                })
+                # Broadcast new traffic to all dashboard clients
+                await manager.broadcast_new_traffic(flow_data)
                 
-                logging.info(f"Processed traffic flow: {flow_data.get('method')} {flow_data.get('host')}{flow_data.get('url')}")
+                # Log privacy leak if detected
+                if flow_data.get("leakType"):
+                    logging.warning(f"PRIVACY LEAK DETECTED: {flow_data['leakType']} - {flow_data.get('leakDetail', 'No details')}")
                 
             except json.JSONDecodeError as e:
-                logging.error(f"Invalid JSON received: {e}")
+                logging.error(f"Invalid JSON received from mitmproxy script: {e}")
+            except Exception as e:
+                logging.error(f"Error processing traffic data: {e}")
                 
     except WebSocketDisconnect:
-        logging.info("Traffic source disconnected")
+        logging.info("mitmproxy script disconnected from traffic endpoint")
 
-# API Routes for dashboard data
+# REST API Endpoints (for debugging and manual access)
+
 @api_router.get("/dashboard/stats")
 async def get_dashboard_stats():
-    return DashboardStats(
-        totalFlows=len(traffic_flows),
-        totalLeaks=len([f for f in traffic_flows if f.get("leakType")]),
-        recentFlows=[TrafficFlow(**f) for f in traffic_flows[-10:]],
-        privacyLeaks=[TrafficFlow(**f) for f in traffic_flows if f.get("leakType")]
-    )
+    """Get current dashboard statistics"""
+    return manager._generate_current_stats()
 
 @api_router.get("/dashboard/flows")
 async def get_all_flows():
+    """Get all traffic flows"""
     return [TrafficFlow(**f) for f in traffic_flows]
 
 @api_router.get("/dashboard/leaks")
 async def get_privacy_leaks():
+    """Get all privacy leaks"""
     return [TrafficFlow(**f) for f in traffic_flows if f.get("leakType")]
 
-# Mock data generator for testing
-@api_router.post("/test/generate-mock-data")
-async def generate_mock_data():
-    """Generate mock traffic data for testing the dashboard"""
+@api_router.get("/system/status")
+async def get_system_status():
+    """Get system status"""
+    return {
+        "status": "running",
+        "dashboard_connections": len(manager.dashboard_connections),
+        "total_flows_stored": len(traffic_flows),
+        "total_leaks_detected": len([f for f in traffic_flows if f.get("leakType")]),
+        "max_flows_capacity": MAX_FLOWS,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+@api_router.post("/system/clear")
+async def clear_traffic_data():
+    """Clear all stored traffic data (for testing purposes)"""
+    global traffic_flows
+    traffic_flows = []
     
-    mock_hosts = [
-        "api.facebook.com", "google-analytics.com", "doubleclick.net",
-        "api.twitter.com", "graph.instagram.com", "api.snapchat.com",
-        "cdn.example.com", "api.weather.com", "maps.googleapis.com"
-    ]
+    # Broadcast updated stats to all clients
+    await manager.broadcast_stats_update()
     
-    mock_paths = [
-        "/api/user/profile", "/track/event", "/location/update",
-        "/device/register", "/ads/tracking", "/analytics/pageview",
-        "/api/contacts/sync", "/user/preferences", "/data/export"
-    ]
-    
-    methods = ["GET", "POST", "PUT"]
-    statuses = ["200", "201", "301", "400", "500"]
-    
-    # Generate 5 mock traffic flows
-    for i in range(5):
-        flow_data = {
-            "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
-            "flowId": str(uuid.uuid4()),
-            "type": random.choice(["HTTP", "HTTPS"]),
-            "method": random.choice(methods),
-            "host": random.choice(mock_hosts),
-            "url": random.choice(mock_paths),
-            "status": random.choice(statuses)
-        }
-        
-        # Apply privacy leak detection
-        leak_type, leak_detail = detect_privacy_leak(flow_data)
-        if leak_type:
-            flow_data["leakType"] = leak_type
-            flow_data["leakDetail"] = leak_detail
-        
-        # Store in memory
-        traffic_flows.append(flow_data)
-        if len(traffic_flows) > 1000:
-            traffic_flows.pop(0)
-        
-        # Broadcast to dashboards
-        await manager.broadcast_to_dashboards({
-            "type": "new_traffic",
-            "data": flow_data
-        })
-    
-    return {"message": f"Generated 5 mock traffic flows"}
+    return {"message": "All traffic data cleared", "flows_remaining": len(traffic_flows)}
 
 # Include the router in the main app
 app.include_router(api_router)
@@ -243,7 +221,7 @@ app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],  # For WebSocket connections
+    allow_origins=["*"],  # Allow all origins for WebSocket connections
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -257,4 +235,13 @@ logger = logging.getLogger(__name__)
 
 @app.get("/")
 async def root():
-    return {"message": "Mobile Privacy Leakage Detector API"}
+    return {
+        "message": "Mobile Privacy Leakage Detector - Backend Bridge",
+        "description": "Receives traffic data from mitmproxy and broadcasts to dashboard clients",
+        "endpoints": {
+            "dashboard_websocket": "/ws/dashboard",
+            "traffic_websocket": "/ws/traffic",
+            "api_stats": "/api/dashboard/stats",
+            "system_status": "/api/system/status"
+        }
+    }

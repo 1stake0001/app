@@ -3,7 +3,6 @@ import './App.css';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Badge } from './components/ui/badge';
-import { Button } from './components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table';
 import { Alert, AlertDescription, AlertTitle } from './components/ui/alert';
 import { Separator } from './components/ui/separator';
@@ -18,17 +17,18 @@ import {
   Smartphone, 
   Users,
   TrendingUp,
-  Clock
+  Clock,
+  Play,
+  Pause,
+  RotateCcw
 } from 'lucide-react';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const WS_URL = BACKEND_URL.replace('https://', 'wss://').replace('http://', 'ws://');
 
-console.log('Backend URL:', BACKEND_URL);
-console.log('WebSocket URL:', WS_URL);
-
 function App() {
   const [isConnected, setIsConnected] = useState(false);
+  const [isListening, setIsListening] = useState(true);
   const [stats, setStats] = useState({
     totalFlows: 0,
     totalLeaks: 0,
@@ -37,9 +37,12 @@ function App() {
   });
   const [allFlows, setAllFlows] = useState([]);
   const [ws, setWs] = useState(null);
-  const [useRestFallback, setUseRestFallback] = useState(true); // Force REST fallback for now
+  const [connectionAttempts, setConnectionAttempts] = useState(0);
+  const [lastUpdate, setLastUpdate] = useState(null);
 
   const connectWebSocket = useCallback(() => {
+    if (!isListening) return;
+    
     try {
       const websocketUrl = `${WS_URL}/ws/dashboard`;
       console.log('Attempting WebSocket connection to:', websocketUrl);
@@ -47,20 +50,24 @@ function App() {
       const websocket = new WebSocket(websocketUrl);
       
       websocket.onopen = () => {
-        console.log('Connected to WebSocket');
+        console.log('Connected to Mobile Privacy Detector backend');
         setIsConnected(true);
+        setConnectionAttempts(0);
       };
       
       websocket.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data);
-          console.log('Received WebSocket message:', message);
+          console.log('Received real-time data:', message);
+          setLastUpdate(new Date());
           
           if (message.type === 'stats_update') {
             setStats(message.data);
             setAllFlows(message.data.recentFlows || []);
           } else if (message.type === 'new_traffic') {
             const newFlow = message.data;
+            
+            // Add new flow to the beginning of the list
             setAllFlows(prev => [newFlow, ...prev].slice(0, 100)); // Keep last 100
             
             // Update stats
@@ -72,6 +79,11 @@ function App() {
                 ? [newFlow, ...prev.privacyLeaks].slice(0, 50)
                 : prev.privacyLeaks
             }));
+            
+            // Show notification for privacy leaks
+            if (newFlow.leakType) {
+              console.warn(`🚨 PRIVACY LEAK DETECTED: ${newFlow.leakType} - ${newFlow.leakDetail}`);
+            }
           }
         } catch (error) {
           console.error('Error parsing WebSocket message:', error);
@@ -82,65 +94,61 @@ function App() {
         console.log('WebSocket connection closed:', event.code, event.reason);
         setIsConnected(false);
         
-        // If WebSocket fails multiple times, switch to REST API polling
-        if (!useRestFallback) {
-          console.log('WebSocket failed, switching to REST API fallback');
-          setUseRestFallback(true);
-          return;
+        if (isListening && connectionAttempts < 5) {
+          // Attempt to reconnect with backoff
+          const delay = Math.min(1000 * Math.pow(2, connectionAttempts), 30000);
+          console.log(`Reconnecting in ${delay/1000}s... (attempt ${connectionAttempts + 1}/5)`);
+          setTimeout(() => {
+            setConnectionAttempts(prev => prev + 1);
+            connectWebSocket();
+          }, delay);
         }
-        
-        // Otherwise attempt to reconnect after 3 seconds
-        setTimeout(connectWebSocket, 3000);
       };
       
       websocket.onerror = (error) => {
         console.error('WebSocket error:', error);
         setIsConnected(false);
-        
-        // Switch to REST fallback on error
-        if (!useRestFallback) {
-          console.log('WebSocket error, switching to REST API fallback');
-          setUseRestFallback(true);
-        }
       };
       
       setWs(websocket);
     } catch (error) {
       console.error('Error connecting to WebSocket:', error);
       setIsConnected(false);
-      setTimeout(connectWebSocket, 3000);
     }
-  }, []);
+  }, [isListening, connectionAttempts]);
 
-  // REST API fallback polling
-  useEffect(() => {
-    if (useRestFallback) {
-      console.log('Using REST API fallback for data updates');
-      const pollData = async () => {
-        try {
-          const response = await fetch(`${BACKEND_URL}/api/dashboard/stats`);
-          const data = await response.json();
-          setStats(data);
-          setAllFlows(data.recentFlows || []);
-          setIsConnected(true); // Consider REST fallback as "connected"
-        } catch (error) {
-          console.error('Error polling dashboard stats:', error);
-          setIsConnected(false);
-        }
-      };
+  const toggleListening = () => {
+    setIsListening(prev => {
+      const newListening = !prev;
+      if (!newListening && ws) {
+        ws.close();
+        setWs(null);
+        setIsConnected(false);
+      } else if (newListening) {
+        setConnectionAttempts(0);
+        connectWebSocket();
+      }
+      return newListening;
+    });
+  };
 
-      // Initial poll
-      pollData();
-      
-      // Poll every 2 seconds
-      const interval = setInterval(pollData, 2000);
-      
-      return () => clearInterval(interval);
+  const clearData = async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/system/clear`, {
+        method: 'POST',
+      });
+      if (response.ok) {
+        setStats({ totalFlows: 0, totalLeaks: 0, recentFlows: [], privacyLeaks: [] });
+        setAllFlows([]);
+        console.log('Traffic data cleared');
+      }
+    } catch (error) {
+      console.error('Error clearing data:', error);
     }
-  }, [useRestFallback]);
+  };
 
   useEffect(() => {
-    if (!useRestFallback) {
+    if (isListening) {
       connectWebSocket();
     }
     
@@ -149,28 +157,15 @@ function App() {
         ws.close();
       }
     };
-  }, [connectWebSocket, useRestFallback]);
-
-  const generateMockData = async () => {
-    try {
-      const response = await fetch(`${BACKEND_URL}/api/test/generate-mock-data`, {
-        method: 'POST',
-      });
-      if (response.ok) {
-        console.log('Mock data generated');
-      }
-    } catch (error) {
-      console.error('Error generating mock data:', error);
-    }
-  };
+  }, [connectWebSocket, isListening]);
 
   const getLeakTypeColor = (leakType) => {
     switch (leakType) {
-      case 'GPS_DATA': return 'bg-red-100 text-red-800 border-red-200';
-      case 'DEVICE_INFO': return 'bg-orange-100 text-orange-800 border-orange-200';
-      case 'PERSONAL_DATA': return 'bg-purple-100 text-purple-800 border-purple-200';
-      case 'TRACKING': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
-      default: return 'bg-gray-100 text-gray-800 border-gray-200';
+      case 'GPS_DATA': return 'bg-red-100 text-red-800 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800';
+      case 'DEVICE_INFO': return 'bg-orange-100 text-orange-800 border-orange-200 dark:bg-orange-900/20 dark:text-orange-300 dark:border-orange-800';
+      case 'PERSONAL_DATA': return 'bg-purple-100 text-purple-800 border-purple-200 dark:bg-purple-900/20 dark:text-purple-300 dark:border-purple-800';
+      case 'TRACKING': return 'bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-900/20 dark:text-yellow-300 dark:border-yellow-800';
+      default: return 'bg-gray-100 text-gray-800 border-gray-200 dark:bg-gray-900/20 dark:text-gray-300 dark:border-gray-800';
     }
   };
 
@@ -194,32 +189,54 @@ function App() {
               <Shield className="w-8 h-8 text-emerald-400" />
               <div>
                 <h1 className="text-2xl font-bold text-slate-100">Mobile Privacy Scanner</h1>
-                <p className="text-sm text-slate-400">Real-time network traffic analysis</p>
+                <p className="text-sm text-slate-400">Real-time mobile network traffic analysis</p>
               </div>
             </div>
             
             <div className="flex items-center space-x-4">
-              <Button 
-                onClick={generateMockData}
-                variant="outline" 
-                size="sm"
-                className="border-slate-600 hover:bg-slate-800"
+              <button 
+                onClick={toggleListening}
+                className={`flex items-center space-x-2 px-4 py-2 rounded-lg border transition-colors ${
+                  isListening 
+                    ? 'border-red-600 bg-red-600/10 text-red-400 hover:bg-red-600/20' 
+                    : 'border-emerald-600 bg-emerald-600/10 text-emerald-400 hover:bg-emerald-600/20'
+                }`}
               >
-                Generate Test Data
-              </Button>
+                {isListening ? (
+                  <>
+                    <Pause className="w-4 h-4" />
+                    <span>Stop Monitoring</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-4 h-4" />
+                    <span>Start Monitoring</span>
+                  </>
+                )}
+              </button>
+
+              <button 
+                onClick={clearData}
+                className="flex items-center space-x-2 px-4 py-2 rounded-lg border border-slate-600 bg-slate-800/50 text-slate-300 hover:bg-slate-800 transition-colors"
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span>Clear Data</span>
+              </button>
               
               <div className="flex items-center space-x-2">
                 {isConnected ? (
                   <>
                     <Wifi className="w-4 h-4 text-emerald-400" />
                     <span className="text-sm font-medium text-emerald-400">
-                      {useRestFallback ? 'Connected (REST)' : 'Connected (WebSocket)'}
+                      Connected{lastUpdate && ` • ${lastUpdate.toLocaleTimeString()}`}
                     </span>
                   </>
                 ) : (
                   <>
                     <WifiOff className="w-4 h-4 text-red-400" />
-                    <span className="text-sm font-medium text-red-400">Disconnected</span>
+                    <span className="text-sm font-medium text-red-400">
+                      {isListening ? `Connecting...${connectionAttempts > 0 ? ` (${connectionAttempts}/5)` : ''}` : 'Not Monitoring'}
+                    </span>
                   </>
                 )}
               </div>
@@ -230,6 +247,17 @@ function App() {
 
       {/* Main Content */}
       <div className="container mx-auto px-6 py-8">
+        {!isConnected && isListening && (
+          <Alert className="mb-6 bg-yellow-900/20 border-yellow-800">
+            <AlertTriangle className="h-4 w-4 text-yellow-400" />
+            <AlertTitle className="text-yellow-400">Waiting for Mobile Traffic</AlertTitle>
+            <AlertDescription className="text-slate-300">
+              Make sure your mobile device is connected and configured to use the proxy. 
+              Start using apps on your phone to see traffic appear here.
+            </AlertDescription>
+          </Alert>
+        )}
+
         <Tabs defaultValue="summary" className="space-y-6">
           <TabsList className="bg-slate-800 border-slate-700">
             <TabsTrigger value="summary" className="data-[state=active]:bg-slate-700">
@@ -238,7 +266,7 @@ function App() {
             </TabsTrigger>
             <TabsTrigger value="traffic" className="data-[state=active]:bg-slate-700">
               <Activity className="w-4 h-4 mr-2" />
-              All Traffic Flows
+              Live Traffic Flows
             </TabsTrigger>
             <TabsTrigger value="alerts" className="data-[state=active]:bg-slate-700">
               <AlertTriangle className="w-4 h-4 mr-2" />
@@ -258,7 +286,7 @@ function App() {
                 </CardHeader>
                 <CardContent>
                   <div className="text-3xl font-bold text-blue-400">{stats.totalFlows}</div>
-                  <p className="text-sm text-slate-400 mt-1">Network requests captured</p>
+                  <p className="text-sm text-slate-400 mt-1">Network requests intercepted</p>
                 </CardContent>
               </Card>
 
@@ -283,10 +311,10 @@ function App() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className={`text-3xl font-bold ${stats.totalLeaks > 5 ? 'text-red-400' : stats.totalLeaks > 0 ? 'text-yellow-400' : 'text-emerald-400'}`}>
-                    {stats.totalLeaks > 5 ? 'HIGH' : stats.totalLeaks > 0 ? 'MEDIUM' : 'LOW'}
+                  <div className={`text-3xl font-bold ${stats.totalLeaks > 10 ? 'text-red-400' : stats.totalLeaks > 5 ? 'text-yellow-400' : stats.totalLeaks > 0 ? 'text-orange-400' : 'text-emerald-400'}`}>
+                    {stats.totalLeaks > 10 ? 'CRITICAL' : stats.totalLeaks > 5 ? 'HIGH' : stats.totalLeaks > 0 ? 'MEDIUM' : 'LOW'}
                   </div>
-                  <p className="text-sm text-slate-400 mt-1">Current threat assessment</p>
+                  <p className="text-sm text-slate-400 mt-1">Current privacy threat level</p>
                 </CardContent>
               </Card>
             </div>
@@ -296,39 +324,47 @@ function App() {
               <CardHeader>
                 <CardTitle className="text-lg font-semibold text-slate-100 flex items-center">
                   <Clock className="w-5 h-5 mr-2 text-slate-400" />
-                  Recent Activity
+                  Live Traffic Stream
                 </CardTitle>
                 <CardDescription className="text-slate-400">
-                  Latest network traffic flows
+                  Real-time network requests from your mobile device
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
-                  {allFlows.slice(0, 5).map((flow) => (
-                    <div key={flow.flowId} className="flex items-center justify-between p-3 rounded-lg bg-slate-800/50 border border-slate-700">
+                  {allFlows.slice(0, 8).map((flow) => (
+                    <div key={flow.flowId} className="flex items-center justify-between p-3 rounded-lg bg-slate-800/50 border border-slate-700 animate-fade-in">
                       <div className="flex items-center space-x-3">
-                        <Badge variant="outline" className="border-slate-600 text-slate-300">
+                        <Badge variant="outline" className="border-slate-600 text-slate-300 font-mono">
                           {flow.method}
                         </Badge>
                         <div>
                           <div className="text-sm font-medium text-slate-200">{flow.host}</div>
-                          <div className="text-xs text-slate-400">{flow.url}</div>
+                          <div className="text-xs text-slate-400 font-mono max-w-xs truncate">{flow.url}</div>
                         </div>
                       </div>
                       <div className="flex items-center space-x-2">
-                        <span className="text-xs text-slate-500">{flow.timestamp}</span>
-                        {flow.leakType && (
-                          <Badge className={getLeakTypeColor(flow.leakType)}>
+                        <span className="text-xs text-slate-500 font-mono">{flow.timestamp}</span>
+                        {flow.leakType ? (
+                          <Badge className={`${getLeakTypeColor(flow.leakType)} animate-pulse`}>
                             {getLeakTypeIcon(flow.leakType)}
                             <span className="ml-1">{flow.leakType}</span>
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="border-emerald-600 text-emerald-400 bg-emerald-950/20">
+                            Safe
                           </Badge>
                         )}
                       </div>
                     </div>
                   ))}
                   {allFlows.length === 0 && (
-                    <div className="text-center py-8 text-slate-400">
-                      No traffic data available. Use "Generate Test Data" to see sample flows.
+                    <div className="text-center py-12 text-slate-400">
+                      <Activity className="w-16 h-16 mx-auto mb-4 text-slate-600" />
+                      <h3 className="text-lg font-semibold text-slate-300 mb-2">Waiting for Mobile Traffic</h3>
+                      <p>
+                        Start using apps on your phone to see network requests appear here in real-time.
+                      </p>
                     </div>
                   )}
                 </div>
@@ -336,13 +372,13 @@ function App() {
             </Card>
           </TabsContent>
 
-          {/* All Traffic Flows Tab */}
+          {/* Live Traffic Flows Tab */}
           <TabsContent value="traffic">
             <Card className="bg-slate-900/50 border-slate-700 backdrop-blur-sm">
               <CardHeader>
-                <CardTitle className="text-lg font-semibold text-slate-100">All Traffic Flows</CardTitle>
+                <CardTitle className="text-lg font-semibold text-slate-100">Live Traffic Flows</CardTitle>
                 <CardDescription className="text-slate-400">
-                  Complete list of captured network requests
+                  Real-time stream of all network requests from your mobile device
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -363,7 +399,7 @@ function App() {
                         <TableRow key={flow.flowId} className="border-slate-700 hover:bg-slate-800/50">
                           <TableCell className="text-slate-400 font-mono text-sm">{flow.timestamp}</TableCell>
                           <TableCell>
-                            <Badge variant="outline" className="border-slate-600 text-slate-300">
+                            <Badge variant="outline" className="border-slate-600 text-slate-300 font-mono">
                               {flow.method}
                             </Badge>
                           </TableCell>
@@ -389,7 +425,7 @@ function App() {
                                 <span className="ml-1">{flow.leakType}</span>
                               </Badge>
                             ) : (
-                              <Badge variant="outline" className="border-emerald-600 text-emerald-400">
+                              <Badge variant="outline" className="border-emerald-600 text-emerald-400 bg-emerald-950/20">
                                 Safe
                               </Badge>
                             )}
@@ -400,8 +436,10 @@ function App() {
                   </Table>
                   
                   {allFlows.length === 0 && (
-                    <div className="text-center py-8 text-slate-400">
-                      No traffic data available. Use "Generate Test Data" to see sample flows.
+                    <div className="text-center py-12 text-slate-400">
+                      <Activity className="w-16 h-16 mx-auto mb-4 text-slate-600" />
+                      <h3 className="text-lg font-semibold text-slate-300 mb-2">No Traffic Data</h3>
+                      <p>Use apps on your mobile device to generate network traffic.</p>
                     </div>
                   )}
                 </div>
@@ -424,23 +462,20 @@ function App() {
                         <Badge className={getLeakTypeColor(leak.leakType)}>
                           {leak.method}
                         </Badge>
+                        <span className="text-xs text-slate-500 font-mono">{leak.timestamp}</span>
                       </AlertTitle>
                       <AlertDescription className="text-slate-300 mt-2">
                         <div className="space-y-2">
-                          <p>{leak.leakDetail}</p>
+                          <p className="font-medium">{leak.leakDetail}</p>
                           <Separator className="bg-slate-700" />
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
                             <div>
                               <span className="text-slate-400">Host:</span>
                               <span className="ml-2 font-mono text-slate-200">{leak.host}</span>
                             </div>
                             <div>
                               <span className="text-slate-400">URL:</span>
-                              <span className="ml-2 font-mono text-slate-200 truncate">{leak.url}</span>
-                            </div>
-                            <div>
-                              <span className="text-slate-400">Time:</span>
-                              <span className="ml-2 font-mono text-slate-200">{leak.timestamp}</span>
+                              <span className="ml-2 font-mono text-slate-200 truncate block">{leak.url}</span>
                             </div>
                           </div>
                         </div>
@@ -456,7 +491,10 @@ function App() {
                     <Shield className="w-16 h-16 mx-auto text-emerald-400 mb-4" />
                     <h3 className="text-lg font-semibold text-slate-200 mb-2">No Privacy Leaks Detected</h3>
                     <p className="text-slate-400">
-                      All network traffic appears to be safe. Use "Generate Test Data" to see sample privacy alerts.
+                      {stats.totalFlows > 0 
+                        ? "All intercepted network traffic appears to be safe." 
+                        : "Start using apps on your mobile device to monitor for privacy leaks."
+                      }
                     </p>
                   </CardContent>
                 </Card>
