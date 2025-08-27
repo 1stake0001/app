@@ -81,13 +81,27 @@ function App() {
       websocket.onclose = (event) => {
         console.log('WebSocket connection closed:', event.code, event.reason);
         setIsConnected(false);
-        // Attempt to reconnect after 3 seconds
+        
+        // If WebSocket fails multiple times, switch to REST API polling
+        if (!useRestFallback) {
+          console.log('WebSocket failed, switching to REST API fallback');
+          setUseRestFallback(true);
+          return;
+        }
+        
+        // Otherwise attempt to reconnect after 3 seconds
         setTimeout(connectWebSocket, 3000);
       };
       
       websocket.onerror = (error) => {
         console.error('WebSocket error:', error);
         setIsConnected(false);
+        
+        // Switch to REST fallback on error
+        if (!useRestFallback) {
+          console.log('WebSocket error, switching to REST API fallback');
+          setUseRestFallback(true);
+        }
       };
       
       setWs(websocket);
