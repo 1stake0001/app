@@ -112,15 +112,44 @@ function App() {
     }
   }, []);
 
+  // REST API fallback polling
   useEffect(() => {
-    connectWebSocket();
+    if (useRestFallback) {
+      console.log('Using REST API fallback for data updates');
+      const pollData = async () => {
+        try {
+          const response = await fetch(`${BACKEND_URL}/api/dashboard/stats`);
+          const data = await response.json();
+          setStats(data);
+          setAllFlows(data.recentFlows || []);
+          setIsConnected(true); // Consider REST fallback as "connected"
+        } catch (error) {
+          console.error('Error polling dashboard stats:', error);
+          setIsConnected(false);
+        }
+      };
+
+      // Initial poll
+      pollData();
+      
+      // Poll every 2 seconds
+      const interval = setInterval(pollData, 2000);
+      
+      return () => clearInterval(interval);
+    }
+  }, [useRestFallback]);
+
+  useEffect(() => {
+    if (!useRestFallback) {
+      connectWebSocket();
+    }
     
     return () => {
       if (ws) {
         ws.close();
       }
     };
-  }, [connectWebSocket]);
+  }, [connectWebSocket, useRestFallback]);
 
   const generateMockData = async () => {
     try {
