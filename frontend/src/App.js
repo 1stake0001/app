@@ -40,7 +40,10 @@ function App() {
 
   const connectWebSocket = useCallback(() => {
     try {
-      const websocket = new WebSocket(`${WS_URL}/ws/dashboard`);
+      const websocketUrl = `${WS_URL}/ws/dashboard`;
+      console.log('Attempting WebSocket connection to:', websocketUrl);
+      
+      const websocket = new WebSocket(websocketUrl);
       
       websocket.onopen = () => {
         console.log('Connected to WebSocket');
@@ -50,6 +53,7 @@ function App() {
       websocket.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data);
+          console.log('Received WebSocket message:', message);
           
           if (message.type === 'stats_update') {
             setStats(message.data);
@@ -73,8 +77,8 @@ function App() {
         }
       };
       
-      websocket.onclose = () => {
-        console.log('WebSocket connection closed');
+      websocket.onclose = (event) => {
+        console.log('WebSocket connection closed:', event.code, event.reason);
         setIsConnected(false);
         // Attempt to reconnect after 3 seconds
         setTimeout(connectWebSocket, 3000);
