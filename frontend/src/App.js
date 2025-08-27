@@ -37,7 +37,7 @@ function App() {
   });
   const [allFlows, setAllFlows] = useState([]);
   const [ws, setWs] = useState(null);
-  const [useRestFallback, setUseRestFallback] = useState(false);
+  const [useRestFallback, setUseRestFallback] = useState(true); // Force REST fallback for now
 
   const connectWebSocket = useCallback(() => {
     try {
